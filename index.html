@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Induction bench</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..700&display=swap" rel="stylesheet">
+</head>
+<body>
+<div class="app">
+  <header class="panel">
+    <h1>Induction bench<span>magnet, coil and field, computed live</span></h1>
+    <div class="status" aria-live="polite"><i class="led" id="dot"></i><span id="status"></span></div>
+    <div class="clock" id="clock"></div>
+  </header>
+
+  <aside class="rack panel" aria-label="Controls">
+    <div class="cap"><b>Controls</b><span>drag the magnet in the view</span></div>
+    <div class="grp">
+      <div class="gh">Experiment</div>
+      <div class="row2" style="margin-top:0"><button class="btn" id="expCoil" aria-pressed="true"><i class="led"></i><span>Coil</span></button><button class="btn" id="expTube" aria-pressed="false"><i class="led"></i><span>Tube drop</span></button></div>
+    </div>
+    <div class="grp">
+      <div class="gh">Magnet material</div>
+      <div class="cells" id="mats" role="group" aria-label="Magnet material"></div>
+      <div class="prop"><span id="matName"></span><span>B<sub>r</sub> <b id="matBr"></b></span></div>
+      <div data-exp="coil">
+        <div class="row2"><button class="btn" id="swing" aria-pressed="true"><i class="led"></i><span>Swinging</span></button><button class="btn" id="flip"><i class="led"></i><span>Flip poles</span></button></div>
+        <div class="dial"><div class="lab"><label for="speed">Swing speed</label><output id="speedOut"></output></div>
+          <input class="rule" type="range" id="speed" min="0.1" max="1" step="0.05" value="0.3"><div class="scale"><span>0.1</span><span>1 m/s</span></div></div>
+      </div>
+    </div>
+    <div class="grp" data-exp="tube" hidden>
+      <div class="gh">Tube material</div>
+      <div class="cells five" id="tubes" role="group" aria-label="Tube material"></div>
+      <div class="prop"><span id="tubeName"></span><span><b id="tubeRho"></b></span></div>
+      <div class="dial"><div class="lab"><label for="wall">Wall thickness</label><output id="wallOut"></output></div>
+        <input class="rule" type="range" id="wall" min="0.5" max="3" step="0.1" value="1.5"><div class="scale"><span>0.5</span><span>3 mm</span></div></div>
+      <div class="row2"><button class="btn" id="drop" aria-pressed="false"><i class="led"></i><span>Drop magnet</span></button><button class="btn" id="tflip"><i class="led"></i><span>Flip poles</span></button></div>
+      <p class="tip">Grab the magnet and pull it up through the tube to feel the drag.</p>
+    </div>
+    <div class="grp" data-exp="coil">
+      <div class="gh">Coil wire</div>
+      <div class="cells wire" id="wires" role="group" aria-label="Coil wire material"></div>
+      <div class="prop"><span id="wireName"></span><span>R <b id="wireR"></b></span></div>
+      <div class="dial"><div class="lab"><label for="turns">Turns</label><output id="turnsOut"></output></div>
+        <input class="rule" type="range" id="turns" min="50" max="400" step="10" value="200"><div class="scale"><span>50</span><span>400</span></div></div>
+      <div class="dial"><div class="lab"><label for="angle">Coil angle</label><output id="angleOut"></output></div>
+        <input class="rule" type="range" id="angle" min="0" max="180" step="1" value="0"><div class="scale"><span>0°</span><span>90°</span><span>180°</span></div></div>
+      <div class="gh" style="margin-top:12px">Core</div>
+      <div class="row2" style="margin-top:0"><button class="btn" id="coreAir" aria-pressed="true"><i class="led"></i><span>Air</span></button><button class="btn" id="coreIron" aria-pressed="false"><i class="led"></i><span>Soft iron</span></button></div>
+    </div>
+    <div class="grp" data-exp="coil">
+      <div class="gh">Battery</div>
+      <div class="dial" style="margin-top:0"><div class="lab"><label for="volt">Voltage</label><output id="voltOut"></output></div>
+        <input class="rule bipolar" type="range" id="volt" min="-12" max="12" step="0.5" value="0"><div class="scale"><span>−12</span><span>0</span><span>+12 V</span></div></div>
+    </div>
+    <div class="grp">
+      <div class="gh">Display</div>
+      <div class="row2" style="margin-top:0"><button class="btn" id="showLines" aria-pressed="true"><i class="led"></i><span>Field lines</span></button><button class="btn" id="showMap" aria-pressed="true"><i class="led"></i><span>Strength map</span></button></div>
+    </div>
+  </aside>
+
+  <main class="view panel" aria-label="Three dimensional view">
+    <div id="view3d"><div class="loading" id="loading">Tracing field lines</div></div>
+    <div class="brackets" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+    <div class="vcap"><b>Fig. 1</b>&nbsp; <span id="vcapTxt">Field of the magnet and coil, horizontal plane through the axis</span></div>
+    <div class="views" role="group" aria-label="Camera view">
+      <button data-view="oblique" aria-pressed="true">Angled</button><button data-view="side" aria-pressed="false">Side</button><button data-view="top" aria-pressed="false">Top</button><button data-view="axis" aria-pressed="false">Along axis</button>
+    </div>
+    <div class="cbar" aria-hidden="true"><div class="ttl"><b>|B|</b>&nbsp; field strength, log scale</div><div class="bar"></div><div class="tks" id="bar"></div></div>
+    <div class="hint">drag magnet to move, drag space to orbit, scroll to zoom</div>
+    <div class="toast" id="toast" role="status"></div>
+  </main>
+
+  <section class="read panel" aria-label="Readouts">
+    <div class="meter" aria-hidden="true">
+      <svg viewBox="0 0 210 156">
+        <path id="arc" fill="none" stroke-width="1.5"></path><g id="ticks" stroke-width="1"></g>
+        <text id="tmin" x="30" y="150" font-size="10.5" text-anchor="middle"></text>
+        <text id="tmax" x="180" y="150" font-size="10.5" text-anchor="middle"></text>
+        <text x="105" y="36" font-size="10.5" text-anchor="middle" id="tzero">0</text>
+        <line id="needle" x1="105" y1="140" x2="105" y2="52" stroke-width="2" stroke-linecap="round"></line>
+        <circle cx="105" cy="140" r="4.5"></circle>
+        <text x="105" y="14" font-size="11" text-anchor="middle" id="mlabel">Galvanometer, coil current</text>
+      </svg>
+    </div>
+    <div class="vals">
+      <div><span class="k"><i style="background:var(--ch1)"></i><span id="kEmf">Induced EMF</span></span><span class="v" id="vEmf"></span><span class="x" id="xEmf"></span></div>
+      <div><span class="k"><i style="background:var(--ch2)"></i><span id="kCur">Current</span> <span class="hot" id="hot"></span></span><span class="v" id="vCur"></span><span class="x" id="xCur"></span></div>
+      <div><span class="k" id="kB">Coil field, center</span><span class="v" id="vB"></span><span class="x" id="xB"></span></div>
+      <div><span class="k" id="kF">Force on magnet</span><span class="v" id="vF"></span><span class="x" id="xF"></span></div>
+    </div>
+    <div class="spec"><div class="cap"><b>Apparatus</b><span>as modeled</span></div><dl id="spec"></dl></div>
+  </section>
+
+  <section class="scope panel" aria-label="Oscilloscope">
+    <div class="cap"><b>Fig. 2&nbsp; Oscilloscope</b><span id="capScope">CH1 induced EMF, CH2 induced current</span></div>
+    <div class="plot"><canvas id="scope" aria-label="Induced voltage and current over the last five seconds"></canvas></div>
+  </section>
+  <section class="lam panel" aria-label="Flux linkage against position">
+    <div class="cap"><b id="capLam">Fig. 3&nbsp; Flux linkage Λ<span class="long"> against magnet position</span></b><span class="long" id="capLamR">EMF = −slope × speed</span></div>
+    <div class="plot"><canvas id="lam" aria-label="Flux linkage against magnet position, with the slope at the magnet"></canvas></div>
+  </section>
+</div>
+
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>
