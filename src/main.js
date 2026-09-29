@@ -319,9 +319,17 @@ function simulate(dt) {
   const GsF = useT ? 0 : (lambda(sM + hS, psiM, thM) - lambda(sM - hS, psiM, thM)) / (2 * hS);
   const GthF = Math.abs(thDot) > 1e-6 ? (lambda(sM, psiM, thM + 1e-3) - lambda(sM, psiM, thM - 1e-3)) / 2e-3 : 0;
   const GpsiF = Math.abs(state.psiDot) > 1e-6 ? (lambda(sM, psiM + 1e-3, thM) - lambda(sM, psiM - 1e-3, thM)) / 2e-3 : 0;
-  const Eo = -(GthF * thDot + GpsiF * state.psiDot);
+  let Eo = -(GthF * thDot + GpsiF * state.psiDot);
   // iron core: applied field from the magnet, averaged over the rod, and its slope
   if (state.corePending !== state.core && (!state.corePending || !collides(state.s, state.psi, state.theta, true))) setCoreNow(state.corePending);
+  if (state.core && (Math.abs(thDot) > 1e-6 || Math.abs(state.psiDot) > 1e-6)) {
+    const eps = 1e-3, Bm = coreBm(sM, psiM, thM);
+    if (Math.abs(core.chiE * (Bm + core.beta * state.I)) < IRON.Bs) {
+      const dth = Math.abs(thDot) > 1e-6 ? (coreBm(sM, psiM, thM + eps) - coreBm(sM, psiM, thM - eps)) / (2 * eps) : 0;
+      const dpsi = Math.abs(state.psiDot) > 1e-6 ? (coreBm(sM, psiM + eps, thM) - coreBm(sM, psiM - eps, thM)) / (2 * eps) : 0;
+      Eo -= core.K * core.chiE * (dth * thDot + dpsi * state.psiDot);
+    }
+  }
   const useM = state.core && useT && TABM.n === TABM.N;
   let BmF = 0, BmdF = 0;
   if (state.core && !useM) { BmF = coreBm(sM, psiM, thM); BmdF = (coreBm(sM + 1e-3, psiM, thM) - coreBm(sM - 1e-3, psiM, thM)) / 2e-3; }
@@ -364,7 +372,9 @@ function simulate(dt) {
   state.s = x; state.v = state.mode === 'swing' || state.mode === 'drag' ? v : 0;
   state.I = I; state.emf = emf; state.Gs = Geff; state.force = Geff * I + F0; state.forceBatt = Geff * V / Rt; state.F0 = F0;
   state.J = state.core ? coreJ(Bmlast, I) : 0;
-  const lt = useT ? tabEval(x) : null; state.lam = (lt ? lt[0] : lambda(x, state.psi, state.theta)) + (state.core ? core.K * state.J : 0);
+  const lt = useT ? tabEval(x) : null;
+  const BmForLinkage = state.core ? (useM ? tabEval(x, TABM)?.[0] : coreBm(x, state.psi, state.theta)) : 0;
+  state.lam = (lt ? lt[0] : lambda(x, state.psi, state.theta)) + (state.core ? core.K * coreJ(BmForLinkage ?? 0, 0) : 0);
   state.samples = samples; state.t += dt;
 }
 function flipMagnet() {
@@ -563,7 +573,7 @@ function snapshot() {
 }
 function coilMomentRatio() { return Math.abs(state.N * state.I) * PI * coil.rMean * coil.rMean / magMoment(); }
 function updateFieldLines() {
-  if (state.exp === 'tube') { vis.rigid.mesh.visible = vis.rigid.arrows.visible = state.show.lines; vis.live.mesh.visible = vis.live.arrows.visible = false; vis.rigidMap.mesh.visible = state.show.map; vis.liveMap.mesh.visible = false; return; }
+  if (state.exp === 'tube') { vis.rigid.mesh.visible = vis.rigid.arrows.visible = state.show.lines; vis.live.mesh.visible = vis.live.arrows.visible = false; vis.rigidMap.mesh.visible = false; vis.liveMap.mesh.visible = false; return; }
   const traced = coilMomentRatio() > 0.03 || Math.abs(state.V) >= 0.5 || (state.core && Math.abs(state.J) > 0.003);
   const L = state.show.lines, Mp = state.show.map;
   if (!traced) {
@@ -614,7 +624,8 @@ const TUBES = {
   pvc: { sym: 'PVC', nm: 'Plastic', rho: Infinity, color: 0xd9d8d0, metal: 0 }
 };
 const TUBE = { ri: 0.007, len: 0.30, hr: 0.0025, N: 120, top: 0.15, start: 0.19, floor: -0.215 };
-const tube = { mat: 'cu', t: 0.0015, y: TUBE.start, v: 0, phase: 'held', I: new Float64Array(TUBE.N), dirty: true, tIn: null, tOut: null, tDrop: 0, ySpring: 0 };
+const tube = { mat: 'cu', t: 0.0015, y: TUBE.start, v: 0, phase: 'held', I: new Float64Array(TUBE.N), dirty: true, tIn: null, tOut: null, tDrop: 0, ySpring: 0, trace: [] };
+const trials = [];
 const mutualLoops = (a, b, d) => { const m = 4 * a * b / ((a + b) * (a + b) + d * d), [K, E] = ellipKE(m), k = Math.sqrt(m); return MU0 * Math.sqrt(a * b) * ((2 / k - k) * K - 2 / k * E); };
 function buildTube() {
   const N = TUBE.N, rm = TUBE.ri + tube.t / 2, T = TUBES[tube.mat];
@@ -646,10 +657,27 @@ function buildTube() {
 }
 function dropMagnet() {
   if (tube.dirty) buildTube();
-  tube.y = TUBE.start; tube.v = 0; tube.I.fill(0); tube.phase = 'fall'; tube.tIn = tube.tOut = null; tube.tDrop = state.t; scope.buf.length = 0;
+  resetTube(); tube.phase = 'fall'; tube.tDrop = state.t;
+}
+function resetTube() {
+  if (tube.dirty) buildTube();
+  if (playback.review) stopReview();
+  tube.y = TUBE.start; tube.v = 0; tube.I.fill(0); tube.phase = 'held'; tube.tIn = tube.tOut = null;
+  tube.F = tube.heat = tube.imax = tube.iBelow = 0; tube.trace = []; scope.buf.length = 0;
+}
+function saveTubeTrial() {
+  if (tube.tIn === null || tube.tOut === null) return;
+  trials.push({ material: TUBES[tube.mat].nm, materialKey: tube.mat, wall: tube.t * 1000, magnet: state.mat, up: !!tube.up,
+    duration: tube.tOut - tube.tIn, trace: tube.trace.filter(p => p.t >= tube.tIn && p.t <= tube.tOut)
+      .map(p => ({ progress: Math.max(0, Math.min(1, (TUBE.top + MAGNET.b - p.y) / (TUBE.len + 2 * MAGNET.b))),
+        y: p.y, speed: p.speed, drag: p.drag, heat: p.heat, imax: p.imax, iBelow: p.iBelow, currents: p.currents })) });
+  if (trials.length > 2) trials.shift();
+  renderTrials();
+  ui.toast(`${TUBES[tube.mat].nm}: ${(tube.tOut - tube.tIn).toFixed(2)} s through the tube`);
 }
 function simulateTube(dt) {
   if (tube.dirty) buildTube();
+  const wasFalling = tube.phase === 'fall';
   const N = TUBE.N, m = magnetMass(), g = 9.81, n = 8, h = dt / n, sig = tube.up ? 1 : -1;
   const G = tube.G || (tube.G = new Float64Array(N)), rhs = tube.rhs || (tube.rhs = new Float64Array(N)), w = tube.w || (tube.w = new Float64Array(N)), u = tube.u || (tube.u = new Float64Array(N));
   const I = tube.I, Mr = tube.Mrow, Ai = tube.Ai, samples = [];
@@ -686,7 +714,10 @@ function simulateTube(dt) {
   // the ring just below the magnet's lower end, for the meter
   const kb = Math.max(0, Math.min(N - 1, Math.floor((tube.y - MAGNET.b - 0.004 + TUBE.len / 2) / TUBE.hr)));
   tube.iBelow = I[kb];
+  if (wasFalling) tube.trace.push({ t: state.t + dt, y: tube.y, speed: Math.abs(tube.v), drag: Math.max(0, tube.F),
+    heat: tube.heat, imax: tube.imax, iBelow: tube.iBelow, currents: new Float32Array(tube.I) });
   state.samples = samples; state.t += dt;
+  if (wasFalling && tube.phase === 'landed') saveTubeTrial();
 }
 
 /* =====================================================================
@@ -976,21 +1007,21 @@ function drawScope() {
   for (let k = 1; k < 10; k++) { const x = L + pw * k / 10; g.beginPath(); g.moveTo(x, T); g.lineTo(x, T + ph); g.stroke(); }
   g.strokeStyle = 'rgba(200,196,186,0.24)'; g.beginPath(); g.moveTo(L, T + ph / 2); g.lineTo(L + pw, T + ph / 2); g.stroke();
   for (let k = 0; k <= 50; k++) { const x = L + pw * k / 50; g.beginPath(); g.moveTo(x, T + ph / 2 - 2.5); g.lineTo(x, T + ph / 2 + 2.5); g.stroke(); }
-  g.font = '11px Archivo, Arial, sans-serif'; g.textAlign = 'right'; g.fillStyle = field;
+  g.font = '12px Archivo, Arial, sans-serif'; g.textAlign = 'right'; g.fillStyle = field;
   g.fillText(fmt(scope.eR, scope.u1, 1), L - 6, T + 9); g.fillText(fmt(-scope.eR, scope.u1, 1), L - 6, T + ph);
   g.textAlign = 'left'; g.fillStyle = copper; g.fillText(fmt(scope.iR, scope.u2, 1), L + pw + 6, T + 9); g.fillText(fmt(-scope.iR, scope.u2, 1), L + pw + 6, T + ph);
   g.save(); g.beginPath(); g.rect(L, T, pw, ph); g.clip();
   const plot = (key, range, color, w) => { g.strokeStyle = color; g.lineWidth = w; g.shadowColor = color; g.shadowBlur = 6; g.beginPath(); let st = false;
     for (const p of data) { const x = L + pw * (p.t - (now - scope.win)) / scope.win, y = T + ph / 2 - Math.max(-1.05, Math.min(1.05, p[key] / range)) * ph / 2; if (!st) { g.moveTo(x, y); st = true; } else g.lineTo(x, y); } g.stroke(); };
   plot('i', scope.iR, copper, 1.4); plot('e', scope.eR, field, 1.8); g.restore();
-  g.fillStyle = soft; g.textAlign = 'center'; g.font = '11px Archivo, Arial, sans-serif'; g.fillText('0.5 s / div', L + pw / 2, H - 6);
+  g.fillStyle = soft; g.textAlign = 'center'; g.font = '12px Archivo, Arial, sans-serif'; g.fillText('0.5 s / div', L + pw / 2, H - 6);
 }
 function drawRings(g, W, H) {
   const soft = cssv('--ink-soft'), faint = cssv('--tick-soft'), ccw = cssv('--ccw'), cw = cssv('--cw'), ink = cssv('--ink');
   const L = 50, R = 12, T = 12, B = 34, pw = W - L - R, ph = H - T - B, X = (y) => L + (y + 0.2) / 0.45 * pw;
-  g.font = '10.5px Archivo, Arial, sans-serif'; g.fillStyle = soft; g.strokeStyle = faint; g.lineWidth = 1;
+  g.font = '12px Archivo, Arial, sans-serif'; g.fillStyle = soft; g.strokeStyle = faint; g.lineWidth = 1;
   for (let y = -0.2; y <= 0.2501; y += 0.05) { g.beginPath(); g.moveTo(X(y), T); g.lineTo(X(y), T + ph); g.stroke(); g.textAlign = 'center'; g.fillText(Math.round(y * 100), X(y), T + ph + 13); }
-  g.fillText('height, cm (tube runs from −15 to +15)', L + pw / 2, T + ph + 27);
+  g.fillText('height (cm), tube ±15', L + pw / 2, T + ph + 27);
   g.fillStyle = 'rgba(128,128,120,0.12)'; g.fillRect(X(-0.15), T, X(0.15) - X(-0.15), ph);
   const imax = Math.max(...Array.from(tube.I, Math.abs)), yr = nice(Math.max(imax * 1.15, 0.05)), Y = (i) => T + ph / 2 - i / yr * ph / 2;
   g.strokeStyle = soft; g.globalAlpha = 0.5; g.beginPath(); g.moveTo(L, Y(0)); g.lineTo(L + pw, Y(0)); g.stroke(); g.globalAlpha = 1;
@@ -1010,12 +1041,12 @@ function drawLam() {
   g.clearRect(0, 0, W, H);
   if (state.exp === 'tube') { drawRings(g, W, H); return; }
   const L = 54, R = 12, T = 12, B = 34, pw = W - L - R, ph = H - T - B;
-  g.font = '10.5px Archivo, Arial, sans-serif'; g.fillStyle = soft; g.strokeStyle = faint; g.lineWidth = 1;
+  g.font = '12px Archivo, Arial, sans-serif'; g.fillStyle = soft; g.strokeStyle = faint; g.lineWidth = 1;
   const X = (x) => L + (x + 0.15) / 0.3 * pw;
   for (let x = -0.15; x <= 0.1501; x += 0.05) { g.beginPath(); g.moveTo(X(x), T); g.lineTo(X(x), T + ph); g.stroke(); g.textAlign = 'center'; g.fillText(Math.round(x * 100), X(x), T + ph + 13); }
   g.fillText('magnet position x, cm', L + pw / 2, T + ph + 27);
-  if (TAB.n < TAB.N || TAB.key !== tabKey()) { g.textAlign = 'center'; g.fillText('computing Λ(x)', L + pw / 2, T + ph / 2); return; }
-  const withCore = state.core && TABM.n === TABM.N;   // total flux linkage with the iron magnetized by the magnet alone
+  if (TAB.n < TAB.N || TAB.key !== tabKey() || (state.core && TABM.n < TABM.N)) { g.textAlign = 'center'; g.fillText('computing Λ(x)', L + pw / 2, T + ph / 2); return; }
+  const withCore = state.core && TABM.n === TABM.N;   // magnet-driven linkage with a battery-off core reference
   const mk = TAB.key + '|' + state.core; if (vis.maskKey !== mk) { vis.mask = new Uint8Array(TAB.N); for (let i = 0; i < TAB.N; i++) vis.mask[i] = collides(TAB.x0 + i * TAB.h, TAB.psi, TAB.th) ? 0 : 1; vis.maskKey = mk; }
   const lamAt = (i) => TAB.vals[i] + (withCore ? core.K * coreJ(TABM.vals[i], 0) : 0);
   let mx = 0; for (let i = 0; i < TAB.N; i++) if (vis.mask[i]) mx = Math.max(mx, Math.abs(lamAt(i)));
@@ -1027,14 +1058,61 @@ function drawLam() {
   g.strokeStyle = cssv('--ch3') || ink; g.lineWidth = 1.6; g.stroke();
   // tangent at the magnet: its slope times the speed gives the EMF from motion
   const e = tabEval(state.s); if (!e) return;
-  const em = withCore ? tabEval(state.s, TABM) : null, Gs = state.Gs, lam0 = e[0] + (em ? core.K * coreJ(em[0], 0) : 0), x0 = X(state.s), y0 = Y(lam0), dx = 0.03; e[0] = lam0;
+  const em = withCore ? tabEval(state.s, TABM) : null;
+  const Gs = e[1] + (em && Math.abs(core.chiE * em[0]) < IRON.Bs ? core.K * core.chiE * em[1] : 0);
+  const lam0 = e[0] + (em ? core.K * coreJ(em[0], 0) : 0), x0 = X(state.s), y0 = Y(lam0), dx = 0.03; e[0] = lam0;
   g.beginPath(); g.moveTo(X(state.s - dx), Y(e[0] - Gs * dx)); g.lineTo(X(state.s + dx), Y(e[0] + Gs * dx)); g.strokeStyle = c1; g.lineWidth = 2; g.stroke();
   g.beginPath(); g.moveTo(x0, T); g.lineTo(x0, T + ph); g.strokeStyle = soft; g.setLineDash([2, 3]); g.lineWidth = 1; g.stroke(); g.setLineDash([]);
   g.fillStyle = ink; g.beginPath(); g.arc(x0, y0, 3.5, 0, 2 * PI); g.fill();
   const emfM = -Gs * state.v;
   g.textAlign = 'left'; g.fillStyle = c1; const tx = L + 8;
   g.fillText(`slope ${fmt(Gs, 'Wb/m', 2)}`, tx, T + 11); g.fillStyle = soft;
-  g.fillText(`EMF = −slope × ${state.v.toFixed(2)} m/s = ${fmt(emfM, 'V', 2)}`, tx, T + 24);
+  g.fillText(state.core && state.V !== 0 ? (W < 400 ? 'Battery-on core differs from curve' : 'Battery-on core response may differ from this curve')
+    : Math.abs(state.psiDot) > 0.01 || Math.abs(state.thetaDot) > 0.01
+      ? (W < 400 ? 'Rotation adds EMF: −dΛ/dt' : 'Rotation changes linkage too: EMF ≈ −dΛ/dt')
+      : (W < 400 ? `Motion EMF ≈ ${fmt(emfM, 'V', 2)}` : `Motion EMF ≈ −slope × ${state.v.toFixed(2)} m/s = ${fmt(emfM, 'V', 2)}`), tx, T + 24);
+}
+function renderTrials() {
+  const a = $('trialA'), b = $('trialB'); if (!a || !b) return;
+  for (const [i, el] of [a, b].entries()) {
+    const trial = trials[i];
+    el.textContent = trial
+      ? `${trial.material} · ${trial.wall.toFixed(1)} mm wall · ${trial.duration.toFixed(2)} s`
+      : `Run ${i + 1}: choose a tube and press Drop magnet`;
+  }
+  $('reviewA').disabled = !trials[0]; $('reviewB').disabled = !trials[1];
+  $('reviewProgress').disabled = !playback.review;
+  const metric = $('compareMetric').value === 'drag' ? 'Magnetic drag' : 'Speed';
+  $('comparePlot').setAttribute('aria-label', trials.length
+    ? `${metric} against progress through the tube. ${trials.map((t, i) => `Trial ${i ? 'B' : 'A'}: ${t.material}, ${t.wall.toFixed(1)} millimeter wall, ${t.duration.toFixed(2)} seconds`).join('. ')}.`
+    : `${metric} against progress through the tube, from 0 to 100 percent; no trials yet.`);
+  drawComparison();
+}
+function drawComparison() {
+  const c = $('comparePlot'); if (!c) return;
+  const r = c.getBoundingClientRect(); if (r.width < 1 || r.height < 1) return;
+  const dpr = Math.min(2, window.devicePixelRatio || 1), w = r.width, h = r.height;
+  if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
+  const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+  const left = 48, right = 12, top = 12, bottom = 28, pw = Math.max(1, w - left - right), ph = Math.max(1, h - top - bottom);
+  const soft = cssv('--plot-ink'), edge = cssv('--plot-grid');
+  g.strokeStyle = edge; g.lineWidth = 1; g.fillStyle = soft; g.font = '12px Archivo, Arial, sans-serif';
+  for (let i = 0; i <= 4; i++) { const x = left + pw * i / 4; g.beginPath(); g.moveTo(x, top); g.lineTo(x, top + ph); g.stroke(); g.textAlign = 'center'; g.fillText(`${i * 25}%`, x, h - 7); }
+  const metric = $('compareMetric').value === 'drag' ? 'drag' : 'speed', unit = metric === 'drag' ? 'N' : 'm/s';
+  const peak = Math.max(metric === 'drag' ? 0.01 : 0.1, ...trials.flatMap(t => t.trace.map(p => p[metric]))), yr = nice(peak * 1.1);
+  for (let i = 0; i <= 2; i++) { const y = top + ph * i / 2; g.beginPath(); g.moveTo(left, y); g.lineTo(left + pw, y); g.stroke(); g.textAlign = 'right'; g.fillText(fmt(yr * (1 - i / 2), unit, 2), left - 5, y + 4); }
+  for (const [i, trial] of trials.entries()) {
+    g.strokeStyle = cssv(i ? '--ch2' : '--ch1'); g.lineWidth = 2.5; g.beginPath();
+    let begun = false;
+    for (const p of trial.trace) { const x = left + pw * p.progress, y = top + ph * (1 - p[metric] / yr);
+      if (!begun) { g.moveTo(x, y); begun = true; } else g.lineTo(x, y); }
+    if (begun) g.stroke();
+  }
+  if (playback.review) {
+    const p = trials[playback.review.trial]?.trace[playback.review.index];
+    if (p) { const x = left + pw * p.progress; g.strokeStyle = cssv('--plot-bright'); g.setLineDash([3, 3]); g.beginPath(); g.moveTo(x, top); g.lineTo(x, top + ph); g.stroke(); g.setLineDash([]); }
+  }
+  if (!trials.length) { g.fillStyle = soft; g.textAlign = 'center'; g.fillText('Run a tube drop to compare traces', left + pw / 2, top + ph / 2); }
 }
 const meter = { range: 0.01 };
 function initMeter() {
@@ -1074,8 +1152,8 @@ function updateReadouts() {
   $('kEmf').textContent = 'Induced EMF'; $('kCur').textContent = 'Current'; $('kB').textContent = state.core ? 'Coil and core field, center' : 'Coil field, center'; $('kF').textContent = 'Force on magnet';
   const Rt = coil.R + R_METER, Ib = state.V / Rt, Ii = state.I - Ib, P = state.I * state.I * coil.R;
   const F = state.force, toward = F * -Math.sign(state.s || -1) > 0;
-  $('vEmf').innerHTML = valUnit(state.emf, 'V', 3); $('xEmf').textContent = 'flux ' + fmt(state.lam, 'Wb', 3);
-  $('vCur').innerHTML = valUnit(state.I, 'A', 3); $('xCur').textContent = state.V !== 0 ? `battery ${fmt(Ib, 'A', 2)}, induced ${fmt(Ii, 'A', 1)}` : `heat ${fmt(P, 'W', 2)}`;
+  $('vEmf').innerHTML = valUnit(state.emf, 'V', 3); $('xEmf').textContent = 'magnet-driven linkage NΦ ' + fmt(state.lam, 'Wb', 3);
+  $('vCur').innerHTML = valUnit(state.I, 'A', 3); $('xCur').textContent = state.V !== 0 ? `total = battery ${fmt(Ib, 'A', 2)} + induced ${fmt(Ii, 'A', 1)}` : `heat ${fmt(P, 'W', 2)}`;
   $('hot').classList.toggle('on', P > 5); $('hot').textContent = fmt(P, 'W', 2) + ' hot';
   $('vB').innerHTML = valUnit(vis.bPerAmp * state.I + (state.core ? magnetField(1e-9, 0, IRON.rc, IRON.h, state.J)[1] : 0), 'T', 3); $('xB').textContent = `${state.N} turns, ${fmt(coil.R, 'Ω', 3)}`;
   const wireLen = state.N * 2 * PI * coil.rMean, spec = [
@@ -1089,17 +1167,26 @@ function updateReadouts() {
 // One plain sentence for what is happening right now
 function updateTubeCaption() {
   const mg = magnetMass() * 9.81, F = tube.F || 0, y = tube.y; let msg, tone = '';
-  if (tube.phase === 'drag') { msg = 'Move it fast and the tube pushes back. Hold it still and nothing happens.'; tone = Math.abs(F) > 1e-3 ? 'live' : ''; }
+  if (tube.phase === 'held') msg = 'Predict the result, then press Drop magnet to test this tube.';
+  else if (tube.phase === 'review') msg = `Reviewing saved trial ${playback.review?.trial ? 'B' : 'A'} at ${Math.round((playback.review && trials[playback.review.trial]?.trace[playback.review.index]?.progress || 0) * 100)}% tube progress.`;
+  else if (tube.phase === 'drag') { msg = 'Move it fast and the tube pushes back. Hold it still and nothing happens.'; tone = Math.abs(F) > 1e-3 ? 'live' : ''; }
   else if (tube.phase === 'landed') { const tr = tube.tIn !== null && tube.tOut !== null ? tube.tOut - tube.tIn : null; msg = tr !== null ? `Landed. It took ${tr.toFixed(2)} s to pass the 30 cm tube.` : 'Landed. Press Drop to run it again.'; }
   else if (y - MAGNET.b > TUBE.top) msg = 'Falling freely toward the tube.';
   else if (y + MAGNET.b < -TUBE.top) msg = 'Out of the tube and falling freely again.';
   else if (!tube.cond) msg = 'Plastic does not conduct, so no eddy currents slow the fall.';
-  else if (F > 0.9 * mg) { msg = `Terminal speed, ${fmt(Math.abs(tube.v), 'm/s', 2)}: eddy current drag balances the weight.`; tone = 'live'; }
+  else if (F > 0.9 * mg) { msg = `Eddy current drag nearly balances the magnet's weight at ${fmt(Math.abs(tube.v), 'm/s', 2)}.`; tone = 'live'; }
   else { msg = 'Eddy currents circle the tube above and below the magnet and push back on it.'; tone = 'live'; }
   $('status').textContent = msg; $('dot').className = 'led ' + tone;
 }
 function updateCaption() {
   if (state.exp === 'tube') { updateTubeCaption(); return; }
+  const combined = coilMomentRatio() > 0.03 || Math.abs(state.V) >= 0.5 || (state.core && Math.abs(state.J) > 0.003);
+  $('vcapTxt').textContent = combined ? 'Computed field lines of magnet and coil, horizontal plane through the axis'
+    : 'Magnet field lines; the weaker coil field is omitted at this scale';
+  $('capLamR').textContent = state.core && state.V !== 0 ? 'Battery-off reference curve' : 'Motion EMF ≈ −slope × speed';
+  $('lam').setAttribute('aria-label', state.core && state.V !== 0
+    ? 'Magnet-driven flux linkage against position with a battery-off iron-core reference; operating core response can differ'
+    : 'Magnet-driven flux linkage against magnet position, with the local slope');
   const Rt = coil.R + R_METER, Ib = state.V / Rt, e = state.emf, rising = -Math.sign(state.lam) * e > 0;
   let msg, tone = '';
   if (state.corePending !== state.core) msg = 'The iron core goes in once the magnet is clear of the coil.';
@@ -1121,6 +1208,95 @@ function updateCaption() {
    ===================================================================== */
 const $ = (id) => document.getElementById(id);
 const ui = { toast(msg) { const t = $('toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(ui._t); ui._t = setTimeout(() => t.classList.remove('show'), 2600); } };
+const STEP = 1 / 60;
+const playback = { paused: false, speed: 1, accumulator: 0, stepRequested: false, review: null };
+const LESSONS = [
+  { title: 'Start with a still magnet', prompt: 'Keep the battery off and the magnet still near the coil. Watch the induced voltage.', question: 'What should the induced voltage read?', answers: ['Zero voltage', 'Nonzero voltage'], correct: 0, feedback: 'A steady magnetic field can link the coil without inducing a voltage.' },
+  { title: 'Move the magnet', prompt: 'Press Swing to move the magnet through the coil. Watch the voltage change sign as the magnet passes.', question: 'What creates the induced voltage?', answers: ['Changing flux linkage', 'The magnet field alone'], correct: 0, feedback: 'The changing flux linkage creates an induced voltage. A still magnet can have flux linkage with zero voltage.' },
+  { title: 'Change speed and turns', prompt: 'Adjust Swing speed and Turns. Compare the peaks in the voltage trace.', question: 'For the same path, what usually raises peak induced voltage?', answers: ['Faster motion or more turns', 'Slower motion or fewer turns'], correct: 0, feedback: 'Faster motion changes linkage more quickly; more turns increase flux linkage.' },
+  { title: 'Reverse the poles', prompt: 'Stop the swing with the magnet clear of the coil, flip its poles, then press Swing again.', question: 'For the same direction of motion, what changes after flipping the magnet?', answers: ['Only the speed', 'The voltage direction'], correct: 1, feedback: 'Reversing the field reverses the sign of flux linkage and the induced voltage for the same motion.' },
+  { title: 'Compare tube drops', prompt: 'Choose copper, press Drop magnet, then choose plastic and repeat. Compare the times and speed curves below.', question: 'Which tube should slow the magnet more?', answers: ['Copper', 'Plastic'], correct: 0, feedback: 'Conducting copper supports eddy currents whose magnetic effect opposes the fall. Plastic does not.' }
+];
+const lesson = { index: 0, visible: true, prediction: null };
+function toggleLesson(show) {
+  lesson.visible = show; $('lessonPanel').hidden = !show;
+  $('lessonToggle').textContent = show ? 'Hide guide' : 'Show guide';
+  $('lessonToggle').setAttribute('aria-expanded', show);
+  if (show) setLessonStep(lesson.index);
+  else $('sceneGoal').textContent = state.exp === 'tube' ? 'Explore: compare two tube drops.' : 'Explore: change one control and watch the induced voltage.';
+}
+function setLessonStep(index) {
+  lesson.index = Math.max(0, Math.min(LESSONS.length - 1, index)); lesson.prediction = null;
+  const item = LESSONS[lesson.index];
+  $('sceneGoal').textContent = `Goal: ${['See why a still magnet induces no voltage.', 'Find what changes induced voltage.', 'Compare speed and coil turns.', 'Test how pole reversal changes the sign.', 'Compare conducting and plastic tubes.'][lesson.index]}`;
+  $('lessonStep').textContent = `Step ${lesson.index + 1} of ${LESSONS.length}`;
+  $('lessonTitle').textContent = item.title; $('lessonPrompt').textContent = item.prompt;
+  $('lessonQuestion').textContent = item.question; $('predictA').textContent = item.answers[0]; $('predictB').textContent = item.answers[1];
+  $('predictA').setAttribute('aria-pressed', 'false'); $('predictB').setAttribute('aria-pressed', 'false');
+  $('lessonFeedback').textContent = ''; $('lessonPrev').disabled = lesson.index === 0; $('lessonNext').disabled = lesson.index === LESSONS.length - 1;
+  $('lessonNext').innerHTML = lesson.index === LESSONS.length - 2 ? 'Final step <span aria-hidden="true">→</span>' : 'Next step <span aria-hidden="true">→</span>';
+  if (lesson.index === 4) {
+    setExp('tube'); setTubeMat('cu'); resetTube();
+  } else {
+    if (state.exp !== 'coil') setExp('coil');
+    if (state.V !== 0) { state.V = 0; $('volt').value = '0'; $('volt').dispatchEvent(new Event('input')); }
+    if (lesson.index === 0) {
+      setSwing(false); state.mode = 'park'; state.s = state.sTarget = state.sTargetPrev = -0.05;
+      state.v = state.I = state.emf = 0; scope.buf.length = 0;
+    } else if (lesson.index === 1) setSwing(false);
+    else if (lesson.index === 2) setSwing(true);
+    else if (lesson.index === 3) { setSwing(false); state.mode = 'park'; state.s = state.sTarget = state.sTargetPrev = -0.12; state.v = 0; }
+  }
+  updateLearningReadouts();
+}
+function answerLesson(choice) {
+  const item = LESSONS[lesson.index]; lesson.prediction = choice;
+  $('predictA').setAttribute('aria-pressed', choice === 0); $('predictB').setAttribute('aria-pressed', choice === 1);
+  $('lessonFeedback').textContent = `${choice === item.correct ? 'Yes.' : 'Try watching the scene, then compare.'} ${item.feedback}`;
+}
+function positionText(m) { const cm = m * 100; return `${cm > 0 ? '+' : ''}${cm.toFixed(1)} cm`; }
+function updateLearningReadouts() {
+  if (state.exp === 'tube') {
+    $('quickMainLabel').textContent = 'Falling speed'; $('quickMainValue').textContent = fmt(Math.abs(tube.v), 'm/s', 3);
+    $('quickSecondLabel').textContent = 'Magnetic drag'; $('quickSecondValue').textContent = fmt(tube.F || 0, 'N', 3);
+    const ringDirection = Math.abs(tube.iBelow || 0) < 1e-5 ? 'No current in the sampled ring.' : `The sampled ring current is ${tube.iBelow >= 0 ? 'counterclockwise' : 'clockwise'} when viewed from above.`;
+    $('conceptSummary').textContent = tube.phase === 'review'
+      ? `Reviewing a recorded ${TUBES[tube.mat].nm.toLowerCase()} drop. The ring bands, speed, and drag show the saved simulation state at this position.`
+      : tube.phase === 'held'
+      ? 'Predict how the chosen tube will affect the fall, then press Drop magnet.'
+      : tube.cond ? `The conducting ${TUBES[tube.mat].nm.toLowerCase()} tube carries induced ring currents. Their magnetic force opposes the magnet’s motion; current energy becomes heat.`
+        : 'Plastic is an insulator in this model, so it carries no eddy current and has no magnetic drag.';
+    $('conceptSummary').textContent += ` ${ringDirection}`;
+  } else {
+    const induced = state.I - state.V / (coil.R + R_METER);
+    $('quickMainLabel').textContent = 'Induced voltage'; $('quickMainValue').textContent = fmt(state.emf, 'V', 3);
+    $('quickSecondLabel').textContent = state.V ? 'Induced current' : 'Coil current'; $('quickSecondValue').textContent = fmt(state.V ? induced : state.I, 'A', 3);
+    $('conceptSummary').textContent = Math.abs(state.v) < 0.005 && Math.abs(state.psiDot) < 0.005 && Math.abs(state.thetaDot) < 0.005
+      ? 'The magnet can create flux linkage through the coil while it is still. With no change in linkage, induced voltage approaches zero.'
+      : 'Changing flux linkage induces a voltage. The sign changes when the linkage rises or falls. The battery, when on, adds its own current.';
+    $('conceptSummary').textContent += ` Magnet-driven linkage ${fmt(state.lam, 'Wb', 2)}; induced voltage ${fmt(state.emf, 'V', 2)}; total current ${fmt(state.I, 'A', 2)} (${Math.abs(state.I) < 1e-5 ? 'no net direction' : state.I > 0 ? 'positive winding direction' : 'negative winding direction'}).`;
+  }
+  if (lesson.visible) {
+    $('lessonObservation').textContent = state.exp === 'tube'
+      ? `Current tube: ${TUBES[tube.mat].nm}. ${tube.phase === 'fall' ? 'Magnet falling.' : tube.phase === 'landed' ? 'Drop complete.' : 'Magnet ready.'}`
+      : `Magnet ${positionText(state.s)} from center · induced voltage ${fmt(state.emf, 'V', 2)}.`;
+  }
+  const slider = $('magPosition');
+  if (document.activeElement !== slider && !state.dragging) {
+    slider.value = (state.exp === 'tube' ? tube.y : state.s) * 100;
+    $('magPositionOut').textContent = positionText(state.exp === 'tube' ? tube.y : state.s);
+    const pct = (+slider.value - +slider.min) / (+slider.max - +slider.min) * 100;
+    slider.style.setProperty('--b', pct.toFixed(2) + '%');
+  }
+}
+function updatePositionRange() {
+  const slider = $('magPosition'), tubeMode = state.exp === 'tube';
+  slider.min = tubeMode ? '-20' : '-15'; slider.max = tubeMode ? '26' : '15';
+  $('magPositionLabel').textContent = tubeMode ? 'Magnet height' : 'Magnet position';
+  const ticks = slider.parentElement.querySelectorAll('.scale span');
+  if (ticks.length === 3) { ticks[0].textContent = tubeMode ? '−20 cm' : '−15 cm'; ticks[2].textContent = tubeMode ? '+26 cm' : '+15 cm'; }
+  updateLearningReadouts();
+}
 function setTurns(N) {
   state.N = N; $('turnsOut').textContent = N; buildCoil();
   if (collides(state.s, state.psi, state.theta)) { state.theta = 0; }
@@ -1137,20 +1313,30 @@ function setCore(on) {
   if (!on) setCoreNow(false);
 }
 function setExp(e) {
+  if (playback.review) stopReview();
   state.exp = e; scope.buf.length = 0; scope.eR = 0.01; scope.iR = 0.001;
+  if (!lesson.visible) $('sceneGoal').textContent = e === 'tube' ? 'Explore: compare two tube drops.' : 'Explore: change one control and watch the induced voltage.';
   document.querySelectorAll('[data-exp]').forEach(el => el.hidden = el.dataset.exp !== e);
   $('expCoil').setAttribute('aria-pressed', e === 'coil'); $('expTube').setAttribute('aria-pressed', e === 'tube');
+  $('showMap').hidden = e === 'tube';
   if (e === 'tube') {
     scope.u1 = 'm/s'; scope.u2 = 'N'; $('capScope').textContent = 'CH1 falling speed, CH2 magnetic drag'; $('capLam').innerHTML = 'Fig. 3&nbsp; Eddy current in each ring'; $('capLamR').textContent = 'opposite signs above and below';
-    $('vcapTxt').textContent = 'Magnet falling through a conducting tube, cut away to show the eddy currents'; $('mlabel').textContent = 'Eddy current, ring below magnet';
-    if (tube.dirty) buildTube(); rebuildTubeVisuals(); dropMagnet(); setView('oblique');
-    state.show.map = false; $('showMap').setAttribute('aria-pressed', false);   // the map plane would hide the eddy bands
+    $('vcapTxt').textContent = 'Magnet field lines only; colored tube bands show induced ring currents'; $('mlabel').textContent = 'Eddy current, ring below magnet';
+    $('scope').setAttribute('aria-label', 'Falling speed and magnetic drag over the last five seconds');
+    $('lam').setAttribute('aria-label', 'Eddy current in each tube ring by height');
+    document.querySelector('.scope').setAttribute('aria-label', 'Speed and drag against time');
+    document.querySelector('.lam').setAttribute('aria-label', 'Eddy current by tube height');
+    if (tube.dirty) buildTube(); rebuildTubeVisuals(); resetTube(); setView('oblique');
   } else {
     scope.u1 = 'V'; scope.u2 = 'A'; $('capScope').textContent = 'CH1 induced EMF, CH2 induced current'; $('capLam').innerHTML = 'Fig. 3&nbsp; Flux linkage Λ<span class="long"> against magnet position</span>'; $('capLamR').textContent = 'EMF = −slope × speed';
     $('vcapTxt').textContent = 'Field of the magnet and coil, horizontal plane through the axis'; $('mlabel').textContent = 'Galvanometer, coil current';
+    $('scope').setAttribute('aria-label', 'Induced voltage and induced current over the last five seconds');
+    $('lam').setAttribute('aria-label', 'Flux linkage against magnet position, with the slope at the magnet');
+    document.querySelector('.scope').setAttribute('aria-label', 'Oscilloscope');
+    document.querySelector('.lam').setAttribute('aria-label', 'Flux linkage against position');
     state.dragging = false; setView('oblique');
   }
-  vis.specHtml = '';
+  vis.specHtml = ''; updatePositionRange(); renderTrials();
 }
 function setTubeMat(k) {
   tube.mat = k; tube.dirty = true; document.querySelectorAll('#tubes .cell').forEach(t => t.setAttribute('aria-pressed', t.dataset.k === k));
@@ -1160,7 +1346,7 @@ function setMaterial(k) {
   state.mat = k; MAGNET.Br = MAGNETS[k].Br; MAGNET.rho = MAGNETS[k].rho;
   document.querySelectorAll('#mats .cell').forEach(t => t.setAttribute('aria-pressed', t.dataset.k === k));
   $('matName').textContent = MAGNETS[k].name; $('matBr').textContent = MAGNETS[k].Br.toFixed(2) + ' T';
-  buildRigidLines(); buildRigidMap(); vis.glowRef = Math.abs(innerTurnFlux(0, 0, 0)); FL.doneKey = ''; FL.mapKey = ''; tube.dirty = true; if (state.exp === 'tube') buildTube();
+  buildRigidLines(); buildRigidMap(); vis.glowRef = Math.abs(innerTurnFlux(0, 0, 0)); FL.doneKey = ''; FL.mapKey = ''; tube.dirty = true; if (state.exp === 'tube') resetTube();
 }
 function setWire(k) {
   state.wire = k; buildCoil(); rebuildCoilVisuals(); computeBPerAmp(); FL.doneKey = ''; FL.mapKey = '';
@@ -1168,6 +1354,53 @@ function setWire(k) {
   $('wireName').textContent = WIRES[k].nm + ' wire, 0.5 mm'; $('wireR').textContent = fmt(coil.R, 'Ω', 3);
 }
 function initUI() {
+  $('lessonToggle').addEventListener('click', () => toggleLesson(!lesson.visible));
+  const moveLesson = delta => { setLessonStep(lesson.index + delta); $('lessonTitle').focus({ preventScroll: true }); };
+  $('lessonPrev').addEventListener('click', () => moveLesson(-1));
+  $('lessonNext').addEventListener('click', () => moveLesson(1));
+  $('predictA').addEventListener('click', () => answerLesson(0));
+  $('predictB').addEventListener('click', () => answerLesson(1));
+  $('playPause').addEventListener('click', () => { playback.paused = !playback.paused; updatePlaybackControls(); });
+  $('playSpeed').addEventListener('change', e => { playback.speed = +e.target.value; });
+  $('stepFrame').addEventListener('click', () => { playback.paused = true; playback.stepRequested = true; updatePlaybackControls(); });
+  $('replay').addEventListener('click', replayExperiment);
+  $('clearTrials').addEventListener('click', () => { if (playback.review) resetTube(); trials.length = 0; renderTrials(); });
+  $('compareMetric').addEventListener('change', renderTrials);
+  $('reviewA').addEventListener('click', () => reviewTrial(0));
+  $('reviewB').addEventListener('click', () => reviewTrial(1));
+  $('reviewProgress').addEventListener('input', e => reviewAtProgress(+e.target.value / 100));
+  let sliderEnd;
+  $('magPosition').addEventListener('input', e => {
+    if (playback.review) stopReview();
+    const target = +e.target.value / 100; $('magPositionOut').textContent = positionText(target);
+    clearTimeout(sliderEnd);
+    if (playback.paused) {
+      state.dragging = false; state.vTarget = 0; state.sTarget = state.sTargetPrev = target;
+      if (state.exp === 'tube') {
+        tube.phase = 'held'; tube.y = target; tube.v = 0; tube.I.fill(0);
+        tube.F = tube.heat = tube.imax = tube.iBelow = 0; tube.tIn = tube.tOut = null; tube.trace = [];
+        scope.buf.length = 0;
+      } else {
+        setSwing(false); state.mode = 'park'; state.s = target; state.v = 0;
+        const at = state.t; simulate(STEP); state.t = at; state.samples = [];
+      }
+      updateReadouts(); updateCaption(); updateLearningReadouts();
+      return;
+    }
+    if (state.exp === 'tube') {
+      if (tube.phase === 'fall' || tube.phase === 'landed') { tube.trace = []; tube.tIn = tube.tOut = null; }
+      tube.phase = 'drag';
+      if (!state.dragging) state.sTargetPrev = tube.y;
+    } else {
+      if (!state.dragging) state.sTargetPrev = state.s;
+      setSwing(false); state.mode = 'drag';
+    }
+    state.dragging = true; state.sTarget = target;
+    sliderEnd = setTimeout(() => {
+      state.dragging = false; state.vTarget = 0;
+      if (state.exp === 'tube') { tube.phase = 'held'; tube.v = 0; } else { state.mode = 'park'; state.v = 0; }
+    }, 350);
+  });
   $('mats').innerHTML = Object.entries(MAGNETS).map(([k, m]) => `<button class="cell" data-k="${k}" title="${m.name}, remanence ${m.Br} T"><span class="z">${m.Br.toFixed(2)} T</span><span class="sym">${m.sym}</span><span class="nm">${m.nm}</span></button>`).join('');
   $('wires').innerHTML = Object.entries(WIRES).map(([k, w]) => `<button class="cell" data-k="${k}" title="${w.nm}, resistivity ${(w.rho * 1e9).toPrecision(3)} nΩ·m"><span class="z">${w.rho * 1e9 >= 100 ? Math.round(w.rho * 1e9) : (w.rho * 1e9).toFixed(1)} nΩm</span><span class="sym">${w.sym}</span><span class="nm">${w.nm}</span></button>`).join('');
   document.querySelectorAll('#mats .cell').forEach(t => t.addEventListener('click', () => setMaterial(t.dataset.k)));
@@ -1189,43 +1422,119 @@ function initUI() {
   // color bar ticks at decades of |B|
   $('bar').innerHTML = [[1, '1 T'], [0.1, '100 mT'], [0.01, '10 mT'], [0.001, '1 mT']].map(([b, l]) => `<span class="tk" style="left:${(bT(b) * 100).toFixed(1)}%">${l}</span>`).join('');
   $('tubes').innerHTML = Object.entries(TUBES).map(([k, w]) => `<button class="cell" data-k="${k}" title="${w.nm}"><span class="z">${isFinite(w.rho) ? (w.rho * 1e9 >= 100 ? Math.round(w.rho * 1e9) : (w.rho * 1e9).toFixed(1)) + ' nΩm' : 'insulator'}</span><span class="sym">${w.sym}</span><span class="nm">${w.nm}</span></button>`).join('');
-  document.querySelectorAll('#tubes .cell').forEach(t => t.addEventListener('click', () => { setTubeMat(t.dataset.k); dropMagnet(); }));
+  document.querySelectorAll('#tubes .cell').forEach(t => t.addEventListener('click', () => { setTubeMat(t.dataset.k); resetTube(); }));
   $('wall').addEventListener('input', e => { tube.t = +e.target.value / 1000; $('wallOut').textContent = (+e.target.value).toFixed(1) + ' mm'; tube.dirty = true; });
-  $('wall').addEventListener('change', () => { buildTube(); rebuildTubeVisuals(); setTubeMat(tube.mat); dropMagnet(); });
+  $('wall').addEventListener('change', () => { setTubeMat(tube.mat); resetTube(); });
   $('wallOut').textContent = '1.5 mm';
   $('drop').addEventListener('click', dropMagnet);
-  $('tflip').addEventListener('click', () => { tube.up = !tube.up; tube.dirty = true; dropMagnet(); });
-  $('expCoil').addEventListener('click', () => setExp('coil')); $('expTube').addEventListener('click', () => setExp('tube'));
+  $('tflip').addEventListener('click', () => { tube.up = !tube.up; tube.dirty = true; resetTube(); });
+  $('expCoil').addEventListener('click', () => { toggleLesson(false); setExp('coil'); });
+  $('expTube').addEventListener('click', () => { toggleLesson(false); setExp('tube'); });
   $('coreAir').addEventListener('click', () => setCore(false)); $('coreIron').addEventListener('click', () => setCore(true));
   setMaterial('n42'); setWire('cu'); setTubeMat('cu');
 }
 function resize() {
   const v = $('view3d'), w = v.clientWidth, h = v.clientHeight; if (!w || !h) return;
   renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
+  drawComparison();
+}
+function updatePlaybackControls() {
+  $('playPause').textContent = playback.paused ? 'Play' : 'Pause';
+  $('playPause').setAttribute('aria-label', playback.paused ? 'Play simulation' : 'Pause simulation');
+}
+function stopReview() {
+  playback.review = null;
+  if (!lesson.visible) $('sceneGoal').textContent = 'Explore: compare two tube drops.';
+  $('reviewProgress').disabled = true; $('reviewProgressOut').textContent = 'Select a trial';
+  $('reviewA').setAttribute('aria-pressed', 'false'); $('reviewB').setAttribute('aria-pressed', 'false');
+  drawComparison();
+}
+function showReviewSample(index, requestedProgress = null) {
+  const review = playback.review, trial = trials[review.trial]; if (!trial?.trace.length) return;
+  review.index = Math.max(0, Math.min(trial.trace.length - 1, index));
+  const p = trial.trace[review.index];
+  tube.phase = 'review'; tube.y = p.y; tube.v = -p.speed; tube.F = p.drag; tube.heat = p.heat;
+  tube.imax = p.imax; tube.iBelow = p.iBelow; tube.I.set(p.currents);
+  tube.tIn = 0; tube.tOut = trial.duration; state.t = review.index * STEP;
+  scope.buf = trial.trace.slice(0, review.index + 1).map((s, i) => ({ t: i * STEP, e: s.speed, i: s.drag }));
+  $('reviewProgress').value = requestedProgress === null ? Math.round(p.progress * 100) : Math.round(requestedProgress * 100);
+  $('reviewProgressOut').textContent = `${Math.round(p.progress * 100)}% sample · ${state.t.toFixed(2)} s`;
+  const slider = $('reviewProgress'), pct = (+slider.value - +slider.min) / (+slider.max - +slider.min) * 100;
+  slider.style.setProperty('--b', pct.toFixed(2) + '%');
+  drawComparison(); updateReadouts(); updateCaption(); updateLearningReadouts();
+}
+function reviewTrial(which) {
+  const trial = trials[which]; if (!trial?.trace.length) return;
+  playback.paused = true; playback.accumulator = 0; playback.stepRequested = false;
+  setMaterial(trial.magnet); tube.t = trial.wall / 1000; tube.up = trial.up; tube.dirty = true;
+  $('wall').value = trial.wall; $('wallOut').textContent = `${trial.wall.toFixed(1)} mm`;
+  $('wall').style.setProperty('--b', ((trial.wall - 0.5) / 2.5 * 100).toFixed(2) + '%');
+  setTubeMat(trial.materialKey); playback.review = { trial: which, index: 0 };
+  $('sceneGoal').textContent = `Review trial ${which ? 'B' : 'A'}: scrub or play through the saved drop.`;
+  $('reviewProgress').disabled = false;
+  $('reviewA').setAttribute('aria-pressed', which === 0); $('reviewB').setAttribute('aria-pressed', which === 1);
+  updatePlaybackControls(); showReviewSample(0);
+}
+function reviewAtProgress(progress) {
+  if (!playback.review) return;
+  playback.paused = true; updatePlaybackControls();
+  const trace = trials[playback.review.trial].trace;
+  let best = 0, distance = Infinity;
+  for (let i = 0; i < trace.length; i++) { const d = Math.abs(trace[i].progress - progress); if (d < distance) { distance = d; best = i; } }
+  showReviewSample(best, progress);
+}
+function replayExperiment() {
+  playback.accumulator = 0; playback.paused = false; playback.stepRequested = false; updatePlaybackControls();
+  if (playback.review) { showReviewSample(0); return; }
+  state.t = 0; state.samples = []; scope.buf.length = 0;
+  if (state.exp === 'tube') dropMagnet();
+  else {
+    state.s = state.sTarget = state.sTargetPrev = -SWING;
+    state.v = state.vTarget = state.I = state.emf = 0;
+    state.psiDot = state.thetaDot = 0; state.flip = null;
+    state.swing.phase = -PI / 2;
+    if (lesson.visible && (lesson.index === 0 || lesson.index === 1 || lesson.index === 3)) setLessonStep(lesson.index);
+    else setSwing(true);
+  }
+  updateLearningReadouts();
+}
+function advanceTick() {
+  if (playback.review) {
+    const r = playback.review, trace = trials[r.trial]?.trace;
+    if (!trace || r.index >= trace.length - 1) { playback.paused = true; updatePlaybackControls(); return; }
+    showReviewSample(r.index + 1); return;
+  }
+  if (state.exp === 'tube') simulateTube(STEP); else { fillTable(4); simulate(STEP); }
+  for (const q of state.samples) scope.buf.push({ t: q[0], e: q[1], i: q[2] });
+  while (scope.buf.length && scope.buf[0].t < state.t - scope.win) scope.buf.shift();
 }
 let lastT = performance.now(), roT = 1;
 function frame(now) {
-  if (window.__paused) return;
-  const dt = Math.min(1 / 30, Math.max(1e-4, (now - lastT) / 1000)); lastT = now;
-  if (state.exp === 'tube') simulateTube(dt); else { fillTable(4); simulate(dt); }
-  if (cam.anim) { const A = cam.anim; A.t += dt; const x = Math.min(1, A.t / A.dur), e = x * x * (3 - 2 * x); cam.az = A.from.az + (A.to.az - A.from.az) * e; cam.el = A.from.el + (A.to.el - A.from.el) * e; cam.r = A.from.r + (A.to.r - A.from.r) * e; if (x >= 1) cam.anim = null; }
-  placeCamera(); updateVisuals(dt);
-  for (const q of state.samples) scope.buf.push({ t: q[0], e: q[1], i: q[2] });
-  while (scope.buf.length && scope.buf[0].t < state.t - scope.win) scope.buf.shift();
+  const elapsed = Math.min(0.1, Math.max(0, (now - lastT) / 1000)); lastT = now;
+  let ticks = 0;
+  if (playback.stepRequested) { advanceTick(); playback.stepRequested = false; ticks = 1; }
+  else if (!playback.paused) {
+    playback.accumulator += elapsed * playback.speed;
+    while (playback.accumulator >= STEP && ticks < 8 && !playback.paused) { advanceTick(); playback.accumulator -= STEP; ticks++; }
+    if (ticks === 8) playback.accumulator = Math.min(playback.accumulator, STEP);
+  }
+  if (cam.anim) { const A = cam.anim; A.t += elapsed; const x = Math.min(1, A.t / A.dur), e = x * x * (3 - 2 * x); cam.az = A.from.az + (A.to.az - A.from.az) * e; cam.el = A.from.el + (A.to.el - A.from.el) * e; cam.r = A.from.r + (A.to.r - A.from.r) * e; if (x >= 1) cam.anim = null; }
+  placeCamera(); updateVisuals(ticks * STEP);
   drawScope(); drawMeter(); drawLam();
-  $('flip').setAttribute('aria-pressed', !!state.flip); $('clock').textContent = `t ${state.t.toFixed(1)} s   step 2.1 ms`;
+  $('flip').setAttribute('aria-pressed', !!state.flip); $('clock').textContent = `t ${state.t.toFixed(2)} s · ${playback.paused ? 'paused' : `${playback.speed}×`} · model step 16.7 ms`;
   if (state.exp === 'tube') $('drop').setAttribute('aria-pressed', tube.phase === 'fall');
-  roT += dt; if (roT > 0.2) { roT = 0; updateReadouts(); updateCaption(); }
+  roT += elapsed; if (roT > 0.2) { roT = 0; updateReadouts(); updateCaption(); updateLearningReadouts(); }
   renderer.render(scene, camera);
   requestAnimationFrame(frame);
 }
 function main() {
   buildCoil(); initScene(); computeBPerAmp(); initPointer(); initUI(); initMeter();
-  fillTable(2000); setSwing(true);
+  fillTable(2000); setSwing(true); setLessonStep(0); updatePlaybackControls(); renderTrials();
+  $('apparatus').open = !window.matchMedia('(max-width: 720px)').matches;
   new ResizeObserver(resize).observe($('view3d')); resize();
   $('loading').remove(); updateReadouts(); updateCaption();
   window.__bench = { state, tube, TUBE, core, IRON, simulateTube, dropMagnet, buildTube, setExp, setCore, setTubeMat, setMaterial, TAB, TABM, simulate, fillTable, updateVisuals, updateFieldLines, updateCaption, updateReadouts, setTurns, setSwing, flipMagnet, collides, lambda, FL, vis, cam, scope, coil: () => coil,
-    renderOnce: () => { placeCamera(); updateVisuals(1 / 60); drawScope(); drawMeter(); drawLam(); updateReadouts(); updateCaption(); renderer.render(scene, camera); }, pause: () => { window.__paused = true; } };
+    playback, trials, advanceTick, renderOnce: () => { placeCamera(); updateVisuals(0); drawScope(); drawMeter(); drawLam(); drawComparison(); updateReadouts(); updateCaption(); updateLearningReadouts(); renderer.render(scene, camera); }, pause: () => { playback.paused = true; updatePlaybackControls(); } };
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(main);
