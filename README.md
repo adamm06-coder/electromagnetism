@@ -4,6 +4,10 @@ An interactive browser app for exploring **electromagnetic induction**. Move a c
 
 The app covers these two induction experiments. It is not a survey of all electromagnetism. Its numbers are **simulation estimates**, not measurements or independently validated predictions; see [Model and validation](MODEL.md).
 
+## Open the app
+
+[Launch the induction bench](https://adamm06-coder.github.io/electromagnetism/) in a WebGL-capable browser. Updates to `main` are built and published to GitHub Pages by the [deployment workflow](.github/workflows/deploy-pages.yml).
+
 ## Run locally
 
 From this directory:
