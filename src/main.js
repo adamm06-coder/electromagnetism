@@ -1528,7 +1528,22 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 function main() {
-  buildCoil(); initScene(); computeBPerAmp(); initPointer(); initUI(); initMeter();
+  buildCoil();
+  try {
+    initScene();
+  } catch (error) {
+    console.error('Could not start the 3D view:', error);
+    document.querySelector('.app').classList.add('webgl-unavailable');
+    const loading = $('loading');
+    loading.classList.add('unsupported');
+    loading.setAttribute('role', 'alert');
+    loading.innerHTML = '<div><h2>3D view unavailable</h2><p>This browser could not start WebGL graphics. Enable hardware acceleration or try an up-to-date browser, then reload the app.</p><button type="button" id="retry3d">Try again</button></div>';
+    for (const control of document.querySelectorAll('.app button:not(#retry3d), .app input, .app select')) control.disabled = true;
+    $('retry3d').addEventListener('click', () => window.location.reload());
+    $('status').textContent = '3D graphics unavailable';
+    return;
+  }
+  computeBPerAmp(); initPointer(); initUI(); initMeter();
   fillTable(2000); setSwing(true); setLessonStep(0); updatePlaybackControls(); renderTrials();
   $('apparatus').open = !window.matchMedia('(max-width: 720px)').matches;
   new ResizeObserver(resize).observe($('view3d')); resize();

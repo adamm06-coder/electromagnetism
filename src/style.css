@@ -74,6 +74,13 @@ header h1 span { color: var(--ink-faint); font-weight: 400; margin-left: 8px; fo
   clip-path: polygon(8px 0, 100% 0, calc(100% - 8px) 100%, 0 100%); }
 .toast.show { opacity: 1; }
 .loading { position: absolute; inset: 0; display: grid; place-items: center; color: #b3b0a7; }
+.webgl-unavailable .view > :not(#view3d) { display: none; }
+.webgl-unavailable .rack, .webgl-unavailable .read { opacity: .55; }
+.loading.unsupported { padding: 28px; text-align: center; }
+.loading.unsupported > div { max-width: 380px; }
+.loading.unsupported h2 { margin: 0 0 10px; color: #e9e6df; font-size: 22px; }
+.loading.unsupported p { margin: 0 0 18px; line-height: 1.5; }
+.loading.unsupported button { min-height: 40px; padding: 8px 18px; border: 1px solid var(--acc); background: var(--acc); color: var(--acc-ink); font: inherit; font-weight: 650; cursor: pointer; }
 .quick-readouts { display: none; }
 .playback { position: absolute; right: 20px; bottom: 18px; z-index: 2; display: flex; align-items: stretch; gap: 4px; }
 .playback button, .playback select { min-height: 34px; border: 1px solid #66635c; background: rgba(23, 23, 22, 0.94); color: #e9e6df; padding: 5px 9px; cursor: pointer; }
